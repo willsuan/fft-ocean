@@ -1,0 +1,7 @@
+build/
+.vscode/
+.idea/
+.DS_Store
+*.o
+*.obj
+compile_commands.json
