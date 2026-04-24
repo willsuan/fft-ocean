@@ -26,23 +26,29 @@ Ocean::~Ocean() {
 void Ocean::reseed(const Params& p) {
     p_ = p;
     if (p_.tile < 1) p_.tile = 1;
+    if (p_.layers.empty()) {
+        // Default 3-layer cascade: long swell / mid chop / short ripples.
+        Layer swell;  swell.L  = 250.f; swell.amplitude  = 2.0f; swell.weight = 1.0f; swell.seed = 1337;
+        Layer chop;   chop.L   = 60.f;  chop.amplitude   = 0.6f; chop.weight  = 1.0f; chop.seed  = 2024;
+        Layer ripple; ripple.L = 15.f;  ripple.amplitude = 0.15f; ripple.weight = 1.0f; ripple.seed = 31415;
+        p_.layers = { swell, chop, ripple };
+    }
     buildMesh_();
-    allocBuffers_();
-    computeInitialSpectrum_();
+    allocBuffersAndSpectrum_();
 }
 
 void Ocean::buildMesh_() {
     const int   N = p_.N;
-    const float L = p_.L;
     const int   K = p_.tile;
 
-    // Mesh spans K*L world units in X and Z, sampled on a (K*N+1)² grid. We
-    // use K*N+1 (not K*N) so the seam row/column is present — its positions
-    // will match the opposite edge of the periodic heightfield, making tile
-    // joins invisible.
+    // Use the LARGEST patch L as the world-tile size so all cascade layers
+    // fit seamlessly into the rendered area.
+    float Lmax = 1.0f;
+    for (const auto& layer : p_.layers) Lmax = std::max(Lmax, layer.L);
+
     const int   side  = K * N + 1;
-    const float total = K * L;
-    const float dx    = L / static_cast<float>(N); // periodic spacing
+    const float total = K * Lmax;
+    const float dx    = Lmax / static_cast<float>(N);
     const float half  = 0.5f * total;
 
     V_.resize(side * side, 3);
@@ -69,33 +75,40 @@ void Ocean::buildMesh_() {
     }
 }
 
-void Ocean::allocBuffers_() {
+void Ocean::allocBuffersAndSpectrum_() {
     if (ifft_) { kiss_fft_free(ifft_); ifft_ = nullptr; }
     int dims[2] = { p_.N, p_.N };
     ifft_ = kiss_fftnd_alloc(dims, 2, /*inverse=*/1, nullptr, nullptr);
+
+    patches_.clear();
+    patches_.resize(p_.layers.size());
     const int NN = p_.N * p_.N;
-    h0_.assign(NN, {0, 0});
-    h0_conj_.assign(NN, {0, 0});
-    omega_.assign(NN, 0.0f);
-    ht_.assign(NN, {0, 0});
-    dx_spec_.assign(NN, {0, 0});
-    dz_spec_.assign(NN, {0, 0});
-    h_out_.assign(NN, {0, 0});
-    dx_out_.assign(NN, {0, 0});
-    dz_out_.assign(NN, {0, 0});
+    for (size_t i = 0; i < p_.layers.size(); ++i) {
+        patches_[i].layer = p_.layers[i];
+        patches_[i].h0.assign(NN, {0, 0});
+        patches_[i].h0_conj.assign(NN, {0, 0});
+        patches_[i].omega.assign(NN, 0.0f);
+        patches_[i].ht.assign(NN, {0, 0});
+        patches_[i].dx_spec.assign(NN, {0, 0});
+        patches_[i].dz_spec.assign(NN, {0, 0});
+        patches_[i].h_out.assign(NN, {0, 0});
+        patches_[i].dx_out.assign(NN, {0, 0});
+        patches_[i].dz_out.assign(NN, {0, 0});
+        initLayer_(patches_[i]);
+    }
 }
 
-float Ocean::philips_(float kx, float kz) const {
+float Ocean::philips_(const Layer& layer, float kx, float kz) const {
     const float k2 = kx * kx + kz * kz;
     if (k2 < 1e-12f) return 0.0f;
-    const float V  = p_.windSpeed;
+    const float V  = layer.windSpeed;
     const float g  = p_.gravity;
     const float Lw = V * V / g;
     const float k  = std::sqrt(k2);
     const float wx = std::cos(p_.windDirDeg * static_cast<float>(M_PI) / 180.0f);
     const float wz = std::sin(p_.windDirDeg * static_cast<float>(M_PI) / 180.0f);
     const float kdotw = (kx * wx + kz * wz) / k;
-    float P = p_.amplitude * std::exp(-1.0f / (k2 * Lw * Lw)) / (k2 * k2)
+    float P = layer.amplitude * std::exp(-1.0f / (k2 * Lw * Lw)) / (k2 * k2)
               * (kdotw * kdotw);
     if (kdotw < 0.0f) P *= 0.07f;
     const float l = Lw * p_.cutoff;
@@ -103,97 +116,117 @@ float Ocean::philips_(float kx, float kz) const {
     return P;
 }
 
-void Ocean::computeInitialSpectrum_() {
-    const int   N = p_.N;
-    const float L = p_.L;
+void Ocean::initLayer_(PatchState& s) {
+    const int   N  = p_.N;
+    const float L  = s.layer.L;
     const float twoPiOverL = 2.0f * static_cast<float>(M_PI) / L;
 
-    std::mt19937 rng(p_.seed);
+    std::mt19937 rng(s.layer.seed);
     auto modeIdx = [&](int i) { return i - N / 2; };
 
     for (int i = 0; i < N; ++i) {
         for (int j = 0; j < N; ++j) {
             float kx = modeIdx(i) * twoPiOverL;
             float kz = modeIdx(j) * twoPiOverL;
-            float P  = philips_(kx, kz);
+            float P  = philips_(s.layer, kx, kz);
             std::complex<float> g = gaussianComplex(rng);
-            h0_[i * N + j]    = g * std::sqrt(P / 2.0f);
-            omega_[i * N + j] = std::sqrt(p_.gravity * std::sqrt(kx*kx + kz*kz));
+            s.h0[i * N + j]    = g * std::sqrt(P / 2.0f);
+            s.omega[i * N + j] = std::sqrt(p_.gravity * std::sqrt(kx*kx + kz*kz));
         }
     }
     for (int i = 0; i < N; ++i) {
         for (int j = 0; j < N; ++j) {
             int mi = (N - i) % N;
             int mj = (N - j) % N;
-            h0_conj_[i * N + j] = std::conj(h0_[mi * N + mj]);
+            s.h0_conj[i * N + j] = std::conj(s.h0[mi * N + mj]);
         }
     }
 }
 
 void Ocean::update(float t, float choppiness, float foamThreshold) {
-    const int   N = p_.N;
-    const float L = p_.L;
-    const int   K = p_.tile;
-    const int   side = K * N + 1;
-    const float twoPiOverL = 2.0f * static_cast<float>(M_PI) / L;
+    const int N    = p_.N;
+    const int K    = p_.tile;
+    const int side = K * N + 1;
 
+    // Evolve each cascade patch independently.
     const std::complex<float> minus_i(0.0f, -1.0f);
     auto modeIdx = [&](int i) { return i - N / 2; };
-    for (int i = 0; i < N; ++i) {
-        for (int j = 0; j < N; ++j) {
-            const int idx = i * N + j;
-            float w  = omega_[idx] * t;
-            float c  = std::cos(w);
-            float s  = std::sin(w);
-            std::complex<float> e_pos{ c,  s};
-            std::complex<float> e_neg{ c, -s};
-            std::complex<float> h = h0_[idx] * e_pos + h0_conj_[idx] * e_neg;
-            ht_[idx] = h;
-            float kx = modeIdx(i) * twoPiOverL;
-            float kz = modeIdx(j) * twoPiOverL;
-            float k  = std::sqrt(kx*kx + kz*kz);
-            if (k < 1e-6f) {
-                dx_spec_[idx] = {0, 0};
-                dz_spec_[idx] = {0, 0};
-            } else {
-                dx_spec_[idx] = minus_i * (kx / k) * h;
-                dz_spec_[idx] = minus_i * (kz / k) * h;
+    for (auto& s : patches_) {
+        const float twoPiOverL = 2.0f * static_cast<float>(M_PI) / s.layer.L;
+        for (int i = 0; i < N; ++i) {
+            for (int j = 0; j < N; ++j) {
+                const int idx = i * N + j;
+                float w  = s.omega[idx] * t;
+                float c  = std::cos(w);
+                float sn = std::sin(w);
+                std::complex<float> e_pos{ c,  sn};
+                std::complex<float> e_neg{ c, -sn};
+                std::complex<float> h = s.h0[idx] * e_pos + s.h0_conj[idx] * e_neg;
+                s.ht[idx] = h;
+                float kx = modeIdx(i) * twoPiOverL;
+                float kz = modeIdx(j) * twoPiOverL;
+                float k  = std::sqrt(kx*kx + kz*kz);
+                if (k < 1e-6f) {
+                    s.dx_spec[idx] = {0, 0};
+                    s.dz_spec[idx] = {0, 0};
+                } else {
+                    s.dx_spec[idx] = minus_i * (kx / k) * h;
+                    s.dz_spec[idx] = minus_i * (kz / k) * h;
+                }
             }
         }
+        kiss_fftnd(ifft_, reinterpret_cast<const kiss_fft_cpx*>(s.ht.data()),
+                          reinterpret_cast<kiss_fft_cpx*>(s.h_out.data()));
+        kiss_fftnd(ifft_, reinterpret_cast<const kiss_fft_cpx*>(s.dx_spec.data()),
+                          reinterpret_cast<kiss_fft_cpx*>(s.dx_out.data()));
+        kiss_fftnd(ifft_, reinterpret_cast<const kiss_fft_cpx*>(s.dz_spec.data()),
+                          reinterpret_cast<kiss_fft_cpx*>(s.dz_out.data()));
     }
 
-    kiss_fftnd(ifft_, reinterpret_cast<const kiss_fft_cpx*>(ht_.data()),
-                      reinterpret_cast<kiss_fft_cpx*>(h_out_.data()));
-    kiss_fftnd(ifft_, reinterpret_cast<const kiss_fft_cpx*>(dx_spec_.data()),
-                      reinterpret_cast<kiss_fft_cpx*>(dx_out_.data()));
-    kiss_fftnd(ifft_, reinterpret_cast<const kiss_fft_cpx*>(dz_spec_.data()),
-                      reinterpret_cast<kiss_fft_cpx*>(dz_out_.data()));
+    // Largest patch defines the world tile size.
+    float Lmax = 1.0f;
+    for (const auto& layer : p_.layers) Lmax = std::max(Lmax, layer.L);
+    const float dxPhys    = Lmax / static_cast<float>(N);
+    const float totalHalf = 0.5f * static_cast<float>(K) * Lmax;
+    const float invNN     = 1.0f / static_cast<float>(N * N);
 
-    // Scatter the NxN periodic result onto the (K*N+1)² tiled mesh via modulo
-    // indexing. Vertices at tile seams end up with the same value at both
-    // sides of the seam, so the rendered surface is seamless.
-    const float norm = 1.0f / static_cast<float>(N * N);
-    const float dxPhys = L / static_cast<float>(N);
-    const float totalHalf = 0.5f * static_cast<float>(K) * L;
-
+    // Build composite surface: for each mesh vertex, query each cascade layer
+    // at the same world position and sum the contributions. Each layer is
+    // periodic at its own L, so we sample via (world_x / L_layer) mod N —
+    // different layers have different periods and the sum appears non-periodic.
     for (int I = 0; I < side; ++I) {
         for (int J = 0; J < side; ++J) {
-            int i = I % N;
-            int j = J % N;
-            int src = i * N + j;
-            float sign = ((i + j) & 1) ? -1.0f : 1.0f;
-            float h  = sign * h_out_[src].real()  * norm;
-            float dx = sign * dx_out_[src].real() * norm * choppiness;
-            float dz = sign * dz_out_[src].real() * norm * choppiness;
+            float world_x = static_cast<float>(I) * dxPhys - totalHalf;
+            float world_z = static_cast<float>(J) * dxPhys - totalHalf;
+
+            float hSum = 0.0f, dxSum = 0.0f, dzSum = 0.0f;
+            for (const auto& s : patches_) {
+                const float Llay = s.layer.L;
+                const float w    = s.layer.weight;
+                // Map world (x,z) into this layer's N×N periodic grid.
+                float u = world_x / Llay;
+                float v = world_z / Llay;
+                u -= std::floor(u);
+                v -= std::floor(v);
+                int i = static_cast<int>(u * N) % N;
+                int j = static_cast<int>(v * N) % N;
+                if (i < 0) i += N;
+                if (j < 0) j += N;
+                int idx = i * N + j;
+                float sign = ((i + j) & 1) ? -1.0f : 1.0f;
+                hSum  += w * sign * s.h_out[idx].real()  * invNN;
+                dxSum += w * sign * s.dx_out[idx].real() * invNN;
+                dzSum += w * sign * s.dz_out[idx].real() * invNN;
+            }
+
             int dst = I * side + J;
-            V_(dst, 0) = static_cast<float>(I) * dxPhys - totalHalf - dx;
-            V_(dst, 1) = h;
-            V_(dst, 2) = static_cast<float>(J) * dxPhys - totalHalf - dz;
+            V_(dst, 0) = world_x - choppiness * dxSum;
+            V_(dst, 1) = hSum;
+            V_(dst, 2) = world_z - choppiness * dzSum;
         }
     }
 
-    // Height-based foam: normalize heights over the whole tiled surface and
-    // mark as foam anything above the user's crest-percentile cutoff.
+    // Height-based foam over the tiled composite.
     double hMin =  std::numeric_limits<double>::infinity();
     double hMax = -std::numeric_limits<double>::infinity();
     for (int v = 0; v < side * side; ++v) {
