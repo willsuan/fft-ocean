@@ -97,3 +97,17 @@ target_link_libraries(ocean PUBLIC
     Eigen3::Eigen
     kissfft
 )
+
+### Tests (does not depend on Polyscope; not built by default)
+add_executable(ocean_tests EXCLUDE_FROM_ALL
+    tests/test_ocean.cpp
+    src/Ocean.cpp
+)
+target_include_directories(ocean_tests PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${kissfft_SOURCE_DIR}
+)
+target_link_libraries(ocean_tests PUBLIC
+    Eigen3::Eigen
+    kissfft
+)

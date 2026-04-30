@@ -5,3 +5,20 @@ build/
 *.o
 *.obj
 compile_commands.json
+
+# Polyscope/ImGui runtime state
+.polyscope.ini
+imgui.ini
+
+# LaTeX intermediates
+*.aux
+*.log
+*.out
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+
+# Presentation working files (kept local, not in repo)
+presentation.pptx
+presentation_briefing.md
+~$*

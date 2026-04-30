@@ -1,21 +1,4 @@
-// Ocean.h — Tessendorf FFT ocean with a multi-scale patch cascade.
-//
-// Based on Jerry Tessendorf, "Simulating Ocean Water" (SIGGRAPH 2001 course
-// notes). Each internal patch is a standalone FFT synthesis of the Philips
-// spectrum at some scale (patch length L, wind speed, amplitude); the final
-// surface is the sum of several such patches evaluated at the same world
-// coordinates. Because different patches have different spatial periods, the
-// composite is visually non-repeating even though each layer is periodic —
-// the standard trick used by AAA game engines to hide FFT tiling.
-//
-// Features:
-//  - Philips wind-wave spectrum with directional preference + upwind damping
-//  - Complex Gaussian initial amplitudes (Box–Muller)
-//  - Real-preserving time evolution
-//  - Choppy waves (horizontal displacement) via two extra IFFTs per patch
-//  - Height-based foam proxy
-//  - Seamless K×K tiling of the simulated domain
-//  - Multi-scale cascade (default 3 layers: swell / chop / ripple)
+// Ocean.h - FFT ocean simulation, Tessendorf 2001 with a 3-layer cascade.
 #pragma once
 
 #include <Eigen/Core>
@@ -26,22 +9,23 @@ struct kiss_fftnd_state;
 
 class Ocean {
 public:
-    // Parameters for a single cascade layer.
+    // one cascade layer: an independent FFT ocean at scale L
     struct Layer {
-        float L          = 250.0f;   // patch size (meters)
+        float L          = 250.0f;   // patch size in meters
         float windSpeed  = 20.0f;
+        float windDirDeg = 0.0f;
         float amplitude  = 1.5f;
-        float weight     = 1.0f;     // output scaling, for solo/mute in UI
+        float weight     = 1.0f;     // mix weight in the final sum
         unsigned seed    = 1337;
     };
 
     struct Params {
-        int   N           = 128;
-        int   tile        = 3;       // K: render K×K tiled copies
-        float windDirDeg  = 0.0f;    // shared across all layers (same wind)
+        int   N           = 128;        // grid size, must be power of 2
+        int   tile        = 3;          // K in K x K tile grid
+        float tileSize    = 400.0f;     // size of one tile (m)
         float gravity     = 9.81f;
-        float cutoff      = 0.001f;
-        std::vector<Layer> layers;   // cascade; if empty, populated w/ 3 defaults
+        float cutoff      = 0.001f;     // small-wave cutoff factor
+        std::vector<Layer> layers;      // empty = use defaults
     };
 
     Ocean() : Ocean(Params{}) {}
@@ -49,16 +33,22 @@ public:
     ~Ocean();
 
     void reseed(const Params& p);
-    void update(float t, float choppiness, float foamThreshold);
+    // displayGain scales h, Dx and Dz uniformly so the rendered surface
+    // stays geometrically self-consistent under visual exaggeration.
+    void update(float t, float choppiness, float foamThreshold,
+                float displayGain = 1.0f);
+
+    void setLayerWeight(size_t i, float w);
 
     const Eigen::MatrixXd& vertices() const { return V_; }
     const Eigen::MatrixXi& faces()    const { return F_; }
     const Eigen::VectorXd& foam()     const { return foam_; }
 
+    int meshSide() const { return p_.tile * p_.N + 1; }
+
     const Params& params() const { return p_; }
 
 private:
-    // Spectrum state for one cascade layer.
     struct PatchState {
         Layer                            layer;
         std::vector<std::complex<float>> h0;
@@ -70,6 +60,10 @@ private:
         std::vector<std::complex<float>> h_out;
         std::vector<std::complex<float>> dx_out;
         std::vector<std::complex<float>> dz_out;
+        // real-valued fields after IFFT + sign flip + normalization
+        std::vector<float>               h_real;
+        std::vector<float>               dx_real;
+        std::vector<float>               dz_real;
     };
 
     Params p_;
@@ -78,6 +72,9 @@ private:
     Eigen::MatrixXd V_;
     Eigen::MatrixXi F_;
     Eigen::VectorXd foam_;
+
+    std::vector<float> dxTotal_;
+    std::vector<float> dzTotal_;
 
     kiss_fftnd_state* ifft_ = nullptr;
 
