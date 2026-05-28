@@ -1,4 +1,4 @@
-Received Honorable Mention. Top 3 out of 15 projects.
+## Received Honorable Mention. Top 3 out of 15 projects.
 
 # FFT Ocean
 
