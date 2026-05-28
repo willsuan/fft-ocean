@@ -1,8 +1,10 @@
+Received Honorable Mention. Top 3 out of 15 projects.
+
 # FFT Ocean
 
 Real-time FFT ocean surface using Tessendorf 2001, with a 3-layer cascade,
 choppy displacement, and Jacobian-determinant foam. CS 384P (Physical
-Simulation) final project, Spring 2026. Received Honorable Mention. Top 3 out of 15 projects.
+Simulation) final project, Spring 2026. 
 
 ![Storm preset](report/figs/storm.png)
 
