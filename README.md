@@ -1,5 +1,3 @@
-## Received Honorable Mention. Top 3 out of 15 projects.
-
 # FFT Ocean
 
 Real-time FFT ocean surface using Tessendorf 2001, with a 3-layer cascade,
